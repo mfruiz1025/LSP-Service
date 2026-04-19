@@ -23,6 +23,8 @@ def create_lsp(project_id: str, body: CreateRequest):
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.delete("/{project_id}")
@@ -36,12 +38,17 @@ def destroy_lsp(project_id: str):
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.get("/{project_id}")
 def get_status(project_id: str):
     """Retorna el estado del contenedor LSP de un proyecto."""
-    return lifecycle.get_status(project_id)
+    try:
+        return lifecycle.get_status(project_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.get("/")
