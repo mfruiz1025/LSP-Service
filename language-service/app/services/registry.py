@@ -1,17 +1,24 @@
 # registry.py
 # Mantiene en memoria el registro de todos los contenedores LSP activos.
-# Estructura: { project_id: { "container_id": str, "language": str } }
+
+from datetime import datetime
+from typing import Optional, Dict, Any
 
 _registry: dict = {}
 
-def add(project_id: str, container_id: str, language: str):
+def add(project_id: str, container_id: str, language: str, 
+        ws_port: int = None, ws_url: str = None, max_clients: int = 4):
     """Registra un contenedor nuevo."""
     _registry[project_id] = {
         "container_id": container_id,
-        "language": language
+        "language": language,
+        "ws_port": ws_port,
+        "ws_url": ws_url,
+        "max_clients": max_clients,
+        "created_at": datetime.utcnow().isoformat()
     }
 
-def get(project_id: str) -> dict | None:
+def get(project_id: str) -> Optional[Dict[str, Any]]:
     """Retorna la info del contenedor de un proyecto, o None si no existe."""
     return _registry.get(project_id)
 

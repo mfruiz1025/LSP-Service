@@ -1,3 +1,5 @@
 fastapi
 uvicorn
 docker
+python-dotenv
+websocket-client

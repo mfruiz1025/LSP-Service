@@ -1,20 +1,39 @@
 #!/bin/bash
 set -e
 
-echo "Iniciando LSP para lenguaje: $LANGUAGE"
+echo "==================================="
+echo "🚀 LSP Multiplexor para $LANGUAGE"
+echo "==================================="
+echo "📦 Lenguaje: $LANGUAGE"
+echo "📁 Workspace: /workspace"
+echo "🌐 Puerto WebSocket: ${LSPMUX_PORT:-3000}"
+echo "👥 Máximo clientes: ${MAX_CLIENTS:-4}"
+echo "==================================="
 
+# Verificar que el LSP está instalado
 case "$LANGUAGE" in
   python)
-    exec pylsp --tcp --host 0.0.0.0 --port 2087
+    which pylsp > /dev/null 2>&1 || { echo "❌ pylsp no encontrado"; exit 1; }
+    echo "✅ pylsp: $(which pylsp)"
     ;;
   cpp)
-    exec clangd --compile-commands-dir=/workspace
+    which clangd > /dev/null 2>&1 || { echo "❌ clangd no encontrado"; exit 1; }
+    echo "✅ clangd: $(which clangd)"
     ;;
   typescript)
-    exec typescript-language-server --stdio
+    which typescript-language-server > /dev/null 2>&1 || { echo "❌ typescript-language-server no encontrado"; exit 1; }
+    echo "✅ typescript-language-server: $(which typescript-language-server)"
     ;;
   *)
-    echo "ERROR: LANGUAGE no definido. Usa: python | cpp | typescript"
+    echo "❌ LANGUAGE no soportado: $LANGUAGE"
+    echo "Use: python | cpp | typescript"
     exit 1
     ;;
 esac
+
+echo "==================================="
+echo "🎯 Iniciando multiplexor..."
+echo "==================================="
+
+cd /app
+exec node server.js
