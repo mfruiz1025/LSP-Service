@@ -229,6 +229,33 @@ GET /lsp/{project_id}/logs?tail=100
 ```bash
 POST /lsp/cleanup?idle_timeout=1800
 ```
+## Monitoreo contenedor
+
+# 1. Ver logs del contenedor (follow mode)
+docker logs -f nombre_del_contenedor
+
+# 2. Ver logs con timestamps
+docker logs -t nombre_del_contenedor
+
+# 3. Ver últimos N líneas
+docker logs --tail 100 nombre_del_contenedor
+
+# 4. Ver logs con detalles adicionales
+docker logs --details nombre_del_contenedor
+
+### Recursos
+
+# 5. Estadísticas de CPU/Memoria del contenedor
+docker stats nombre_del_contenedor
+
+# 6. Todos los contenedores LSP
+docker stats --filter "name=lsp"
+
+# 7. Ver procesos dentro del contenedor
+docker exec nombre_del_contenedor ps aux
+
+# 8. Ver procesos LSP específicos
+docker exec nombre_del_contenedor ps aux | grep -E "pylsp|clangd|typescript"
 
 ## 🧪 Pruebas
 
@@ -296,3 +323,7 @@ wscat -c ws://127.0.0.1:32768
 - **Mapeo dinámico de puertos**: El host asigna puertos aleatorios automáticamente
 - **Limpieza automática**: Contenedores inactivos se detienen tras timeout configurable
 - **Traducción de rutas**: Manejo automático de `file:///workspace` ↔ `/workspace`
+
+# TODO
+## 1. PROBAR CON ANGULAR
+## 2. AUTENTIFICACION CON EL API GATEWAY
