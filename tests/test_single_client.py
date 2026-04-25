@@ -108,6 +108,7 @@ class LSPClient:
         print("  5 - Probar definición")
         print("  6 - Probar código complejo")
         print("  7 - Ejecutar TODAS las pruebas")
+        print("  8 - Probar posición inválida (-32602)")
         print("  q - Salir")
         print("  raw - Modo JSON manual")
         print("="*50)
@@ -174,6 +175,10 @@ class LSPClient:
 
 calc = Calculator()
 calc.'''
+
+        last_line_index = len(code.splitlines()) - 1
+        last_line_text = code.splitlines()[-1]
+        completion_character = len(last_line_text)
         
         self.send_notification("textDocument/didOpen", {
             "textDocument": {
@@ -188,7 +193,7 @@ calc.'''
         
         self.send_message("textDocument/completion", {
             "textDocument": {"uri": "file:///workspace/class_test.py"},
-            "position": {"line": 10, "character": 5}
+            "position": {"line": last_line_index, "character": completion_character}
         })
     
     def test_hover(self):
@@ -276,6 +281,10 @@ class Processor:
 
 proc = Processor()
 proc.'''
+
+        last_line_index = len(code.splitlines()) - 1
+        last_line_text = code.splitlines()[-1]
+        completion_character = len(last_line_text)
         
         self.send_notification("textDocument/didOpen", {
             "textDocument": {
@@ -290,7 +299,34 @@ proc.'''
         
         self.send_message("textDocument/completion", {
             "textDocument": {"uri": "file:///workspace/complex.py"},
-            "position": {"line": 18, "character": 5}
+            "position": {"line": last_line_index, "character": completion_character}
+        })
+
+    def test_invalid_position(self):
+        """Prueba que el multiplexor rechaza posiciones fuera de rango"""
+        if not self.initialized:
+            print("⚠️  Primero inicializa el LSP (comando 1)")
+            return
+
+        print("\n🧪 Probando posición inválida (debe devolver -32602)...")
+
+        code = "print('hello')\n"
+        uri = "file:///workspace/invalid_pos.py"
+
+        self.send_notification("textDocument/didOpen", {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "python",
+                "version": 1,
+                "text": code
+            }
+        })
+
+        time.sleep(0.5)
+
+        self.send_message("textDocument/completion", {
+            "textDocument": {"uri": uri},
+            "position": {"line": 999, "character": 0}
         })
     
     def test_all(self):
@@ -354,6 +390,8 @@ proc.'''
                     self.test_complex()
                 elif cmd == '7':
                     self.test_all()
+                elif cmd == '8':
+                    self.test_invalid_position()
                 elif cmd == 'raw':
                     self.raw_mode()
                 elif cmd in ['q', 'quit', 'exit']:

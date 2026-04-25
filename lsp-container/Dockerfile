@@ -20,8 +20,11 @@ RUN mkdir -p /etc/apt/keyrings && \
     apt-get update && apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Instala servidores LSP
-RUN pip3 install python-lsp-server
+# Instala servidores LSP + linters esenciales para diagnostics.
+# Nota: `python-lsp-server[all]` debería incluirlos, pero los fijamos explícitamente
+# para evitar imágenes que arranquen sin plugins de lint disponibles.
+RUN pip3 install "python-lsp-server[all]" pyflakes pycodestyle
+RUN python3 -c "import pylsp, pyflakes, pycodestyle; print('✅ pylsp + linters instalados')"
 RUN npm install -g typescript-language-server typescript
 
 # Crea directorio de trabajo para el puente WebSocket

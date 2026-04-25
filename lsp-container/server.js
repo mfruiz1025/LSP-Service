@@ -46,7 +46,28 @@ class LSPMultiplexer {
         
         /** @property {Object} cachedCapabilities - Capacidades del LSP cacheadas */
         this.cachedCapabilities = {};
-        
+
+        /** @property {Object|null} cachedInitializeResult - Resultado completo de initialize para clientes futuros */
+        this.cachedInitializeResult = null;
+
+        /** @property {WebSocket|null} primaryClient - Cliente que realizó la inicialización real del LSP */
+        this.primaryClient = null;
+
+        /** @property {boolean} primaryInitializedForwarded - Si ya se reenvió 'initialized' al LSP */
+        this.primaryInitializedForwarded = false;
+
+        /** @property {boolean} defaultConfigurationSent - Si ya se envió configuración por defecto al LSP */
+        this.defaultConfigurationSent = false;
+
+        /** @property {number} nextInternalRequestId - Contador de IDs internos hacia el LSP */
+        this.nextInternalRequestId = 1;
+
+        /** @property {Map<number, { ws: WebSocket, clientRequestId: any }>} pendingRequests - Mapeo id interno -> cliente origen */
+        this.pendingRequests = new Map();
+
+        /** @property {Map<string, { text: string, owner: WebSocket }>} documents - Estado canónico por URI (texto + dueño) */
+        this.documents = new Map();
+
         /** @property {string} lspBuffer - Buffer para mensajes LSP incompletos */
         this.lspBuffer = '';
         
@@ -157,14 +178,36 @@ class LSPMultiplexer {
                 try {
                     const message = JSON.parse(messageStr);
                     console.log(`[LSP] Mensaje recibido: ${message.method || 'response'}`);
+
+                    if (message.method === 'textDocument/publishDiagnostics') {
+                        const uri = message?.params?.uri;
+                        const count = message?.params?.diagnostics?.length || 0;
+                        console.log(`[LSP] publishDiagnostics: ${count} para ${uri}`);
+                        if (count > 0) {
+                            const first = message.params.diagnostics[0];
+                            console.log('[LSP] Primer diagnóstico:', {
+                                message: first?.message,
+                                severity: first?.severity,
+                                start: first?.range?.start,
+                                end: first?.range?.end
+                            });
+                        }
+                    }
                     
                     // Cachear capacidades del LSP para clientes futuros
                     if (message.id && message.result && message.result.capabilities) {
                         this.cachedCapabilities = message.result.capabilities;
+                        this.cachedInitializeResult = message.result;
                         console.log('[LSP] Capacidades cacheadas');
                     }
                     
-                    // Distribuir mensaje a todos los clientes
+                    // Responses (con id) deben rutearse al cliente origen
+                    if (message.id !== undefined && message.id !== null) {
+                        this.routeResponseToClient(message);
+                        continue;
+                    }
+
+                    // Notifications/events (sin id) sí se pueden broadcast
                     this.broadcast(message);
                 } catch (e) {
                     console.error('[LSP] Error parseando mensaje:', e.message);
@@ -175,6 +218,106 @@ class LSPMultiplexer {
                 break;
             }
         }
+    }
+
+    /**
+     * Rutea una respuesta del LSP al cliente que originó el request.
+     * Reemplaza el id interno por el id original del cliente.
+     * @param {Object} message - Mensaje JSON-RPC de respuesta desde el LSP
+     */
+    routeResponseToClient(message) {
+        const mapping = this.pendingRequests.get(message.id);
+        if (!mapping) {
+            console.warn(`[LSPMultiplexer] Response sin mapeo para id=${message.id}. Ignorando.`);
+            return;
+        }
+
+        const { ws, clientRequestId } = mapping;
+        this.pendingRequests.delete(message.id);
+
+        if (ws.readyState !== 1) { // WebSocket.OPEN
+            return;
+        }
+
+        const clientMessage = { ...message, id: clientRequestId };
+        try {
+            ws.send(JSON.stringify(clientMessage));
+        } catch (e) {
+            console.error('[LSPMultiplexer] Error enviando response al cliente:', e);
+        }
+    }
+
+    /**
+     * Envía un request al LSP reescribiendo el id para evitar colisiones entre clientes.
+     * @param {WebSocket} ws - Cliente origen
+     * @param {Object} message - Request JSON-RPC del cliente
+     */
+    forwardClientRequest(ws, message) {
+        const internalId = this.nextInternalRequestId++;
+        this.pendingRequests.set(internalId, { ws, clientRequestId: message.id });
+
+        const lspMessage = { ...message, id: internalId };
+        this.sendToLSP(lspMessage);
+    }
+
+    /**
+     * Envía un JSON-RPC error al cliente.
+     * @param {WebSocket} ws
+     * @param {*} requestId
+     * @param {number} code
+     * @param {string} message
+     */
+    sendJsonRpcError(ws, requestId, code, message) {
+        if (!ws || ws.readyState !== 1) return;
+        ws.send(JSON.stringify({
+            jsonrpc: "2.0",
+            id: requestId,
+            error: { code, message }
+        }));
+    }
+
+    /**
+     * Envía un window/logMessage a un solo cliente (útil cuando se ignoran notifications).
+     * @param {WebSocket} ws
+     * @param {string} message
+     */
+    sendLogMessage(ws, message) {
+        if (!ws || ws.readyState !== 1) return;
+        ws.send(JSON.stringify({
+            jsonrpc: "2.0",
+            method: "window/logMessage",
+            params: { type: 3, message }
+        }));
+    }
+
+    /**
+     * Valida position (line/character) contra el texto cacheado para un URI.
+     * @param {string} uri
+     * @param {{line: number, character: number}} position
+     * @returns {{ok: true} | {ok: false, reason: string}}
+     */
+    validatePosition(uri, position) {
+        const doc = this.documents.get(uri);
+        if (!doc) return { ok: true };
+
+        const line = position?.line;
+        const character = position?.character;
+
+        if (!Number.isInteger(line) || !Number.isInteger(character)) {
+            return { ok: false, reason: 'position.line/character must be integers' };
+        }
+
+        const lines = doc.text.split('\n');
+        if (line < 0 || line >= lines.length) {
+            return { ok: false, reason: '`line` parameter is not in a valid range' };
+        }
+
+        const lineText = lines[line] ?? '';
+        if (character < 0 || character > lineText.length) {
+            return { ok: false, reason: '`character` parameter is not in a valid range' };
+        }
+
+        return { ok: true };
     }
 
     /**
@@ -278,6 +421,20 @@ class LSPMultiplexer {
                 console.log(`[LSPMultiplexer] Cliente desconectado: ${clientId}`);
                 this.clients.delete(ws);
                 console.log(`[LSPMultiplexer] Clientes restantes: ${this.clients.size}/${this.maxClients}`);
+
+                // Cerrar/limpiar documentos que pertenecen a este cliente
+                for (const [uri, doc] of this.documents.entries()) {
+                    if (doc.owner === ws) {
+                        this.documents.delete(uri);
+                        if (this.lspProcess && this.lspProcess.stdin.writable) {
+                            this.sendToLSP({
+                                jsonrpc: "2.0",
+                                method: "textDocument/didClose",
+                                params: { textDocument: { uri } }
+                            });
+                        }
+                    }
+                }
                 
                 // Programar shutdown si no quedan clientes
                 if (this.clients.size === 0) {
@@ -310,29 +467,174 @@ class LSPMultiplexer {
      * @returns {void}
      */
     handleClientMessage(ws, message) {
+        // Bloquear métodos peligrosos en sesión compartida
+        if (message.method === 'shutdown' || message.method === 'exit') {
+            if (message.id !== undefined && message.id !== null) {
+                this.sendJsonRpcError(ws, message.id, -32601, 'Method not allowed in shared session');
+            }
+            return;
+        }
+
         // Manejo especial del método initialize
         if (message.method === 'initialize') {
             if (!this.isInitialized) {
                 // Primer cliente: inicializar LSP
                 console.log('[LSPMultiplexer] Primera inicialización del LSP');
                 this.isInitialized = true;
-                this.sendToLSP(message);
+                this.primaryClient = ws;
+                this.primaryInitializedForwarded = false;
+                this.forwardClientRequest(ws, message);
             } else {
-                // Clientes adicionales: responder desde cache
+                // Clientes adicionales: responder desde cache si está disponible
                 console.log('[LSPMultiplexer] Cliente adicional - LSP ya inicializado');
-                ws.send(JSON.stringify({
-                    jsonrpc: "2.0",
-                    id: message.id,
-                    result: {
-                        capabilities: this.cachedCapabilities || {}
-                    }
-                }));
+                if (this.cachedInitializeResult) {
+                    ws.send(JSON.stringify({
+                        jsonrpc: "2.0",
+                        id: message.id,
+                        result: this.cachedInitializeResult
+                    }));
+                } else {
+                    this.sendJsonRpcError(ws, message.id, -32002, 'LSP is still initializing. Retry shortly.');
+                }
             }
             return;
         }
 
+        // Evitar que clientes secundarios envíen initialized al LSP
+        if (message.method === 'initialized') {
+            if (ws === this.primaryClient && !this.primaryInitializedForwarded) {
+                this.primaryInitializedForwarded = true;
+                this.sendToLSP(message);
+
+                if (this.language === 'python' && !this.defaultConfigurationSent) {
+                    this.defaultConfigurationSent = true;
+                    this.sendToLSP({
+                        jsonrpc: "2.0",
+                        method: "workspace/didChangeConfiguration",
+                        params: {
+                            settings: {
+                                pylsp: {
+                                    plugins: {
+                                        pycodestyle: { enabled: true },
+                                        pyflakes: { enabled: true },
+                                        flake8: { enabled: true },
+                                        mccabe: { enabled: true }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    console.log('[LSPMultiplexer] Configuración por defecto enviada a pylsp (plugins lint habilitados)');
+                }
+            } else {
+                this.sendLogMessage(ws, 'Ignoring initialized notification (shared LSP session)');
+            }
+            return;
+        }
+
+        // Sin proceso LSP disponible, ignorar silenciosamente
+        if (!this.lspProcess || !this.lspProcess.stdin.writable) {
+            return;
+        }
+
+        // Mantener estado canónico de documentos (owner-writer)
+        if (message.method === 'textDocument/didOpen') {
+            const uri = message?.params?.textDocument?.uri;
+            const text = message?.params?.textDocument?.text ?? '';
+            if (typeof uri === 'string') {
+                const existing = this.documents.get(uri);
+                if (!existing) {
+                    this.documents.set(uri, { text, owner: ws });
+                    this.sendToLSP(message);
+                } else if (existing.owner === ws) {
+                    // Re-open del mismo dueño: tratarlo como refresco de texto
+                    this.documents.set(uri, { text, owner: ws });
+                    this.sendToLSP(message);
+                } else {
+                    this.sendLogMessage(ws, `Document already owned by another client: ${uri}`);
+                }
+                return;
+            }
+        }
+
+        if (message.method === 'textDocument/didChange') {
+            const uri = message?.params?.textDocument?.uri;
+            if (typeof uri === 'string') {
+                const existing = this.documents.get(uri);
+                if (!existing) {
+                    // No visto: reenviar sin validar
+                    this.sendToLSP(message);
+                    return;
+                }
+                if (existing.owner !== ws) {
+                    this.sendLogMessage(ws, `Ignoring didChange from non-owner client: ${uri}`);
+                    return;
+                }
+
+                const newText = message?.params?.contentChanges?.[0]?.text;
+                if (typeof newText === 'string') {
+                    this.documents.set(uri, { text: newText, owner: ws });
+                }
+                this.sendToLSP(message);
+                return;
+            }
+        }
+
+        if (message.method === 'textDocument/didClose') {
+            const uri = message?.params?.textDocument?.uri;
+            if (typeof uri === 'string') {
+                const existing = this.documents.get(uri);
+                if (existing && existing.owner === ws) {
+                    this.documents.delete(uri);
+                    this.sendToLSP(message);
+                } else {
+                    this.sendLogMessage(ws, `Ignoring didClose from non-owner client: ${uri}`);
+                }
+                return;
+            }
+        }
+
+        if (message.method === 'textDocument/didSave') {
+            const uri = message?.params?.textDocument?.uri;
+            if (typeof uri === 'string') {
+                const existing = this.documents.get(uri);
+                if (!existing) {
+                    this.sendToLSP(message);
+                    return;
+                }
+                if (existing.owner !== ws) {
+                    this.sendLogMessage(ws, `Ignoring didSave from non-owner client: ${uri}`);
+                    return;
+                }
+                this.sendToLSP(message);
+                return;
+            }
+        }
+
+        // Validación de position para requests comunes
+        const needsPositionValidation = (
+            message.method === 'textDocument/completion' ||
+            message.method === 'textDocument/hover' ||
+            message.method === 'textDocument/definition'
+        );
+
+        if (needsPositionValidation && message?.params?.textDocument?.uri && message?.params?.position) {
+            const uri = message.params.textDocument.uri;
+            const validation = this.validatePosition(uri, message.params.position);
+            if (!validation.ok) {
+                if (message.id !== undefined && message.id !== null) {
+                    this.sendJsonRpcError(ws, message.id, -32602, validation.reason);
+                }
+                return;
+            }
+        }
+
         // Reenviar otros mensajes al LSP si el proceso está disponible
-        if (this.lspProcess && this.lspProcess.stdin.writable) {
+        if (message.id !== undefined && message.id !== null && message.method) {
+            // Request: reescribir id y rutear response
+            this.forwardClientRequest(ws, message);
+        } else {
+            // Notification: reenviar tal cual
             this.sendToLSP(message);
         }
     }
@@ -346,6 +648,11 @@ class LSPMultiplexer {
      * @returns {void}
      */
     sendToLSP(message) {
+        if (!this.lspProcess || !this.lspProcess.stdin || !this.lspProcess.stdin.writable) {
+            console.warn('[LSPMultiplexer] LSP stdin no disponible; descartando mensaje');
+            return;
+        }
+
         const content = JSON.stringify(message);
         const header = `Content-Length: ${Buffer.byteLength(content)}\r\n\r\n`;
         
