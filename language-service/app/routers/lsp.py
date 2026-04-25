@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional
 from app.services import lifecycle
+from app.services import registry
 
 router = APIRouter(prefix="/lsp", tags=["lsp"])
 
@@ -63,16 +64,25 @@ def create_lsp(project_id: str, body: CreateRequest):
 
 
 @router.delete("/{project_id}")
-def destroy_lsp(project_id: str):
+def destroy_lsp(project_id: str, language: Optional[str] = Query(None, description="Lenguaje (python, cpp, typescript)")):
     """Destruye el contenedor LSP de un proyecto."""
     try:
-        deleted = lifecycle.destroy_container(project_id)
+        if language is None:
+            langs = registry.list_languages(project_id)
+            if not langs:
+                raise HTTPException(status_code=404, detail=f"No existe contenedor para {project_id}")
+            if len(langs) > 1:
+                raise HTTPException(status_code=400, detail=f"Hay múltiples lenguajes activos para {project_id}. Especifica ?language=...")
+            language = next(iter(langs.keys()))
+
+        deleted = lifecycle.destroy_container(project_id, language)
         if not deleted:
-            raise HTTPException(status_code=404, detail=f"No existe contenedor para {project_id}")
+            raise HTTPException(status_code=404, detail=f"No existe contenedor para {project_id} ({language})")
         
         return {
             "message": "Contenedor eliminado exitosamente",
-            "project_id": project_id
+            "project_id": project_id,
+            "language": language
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -81,19 +91,39 @@ def destroy_lsp(project_id: str):
 
 
 @router.get("/{project_id}", response_model=StatusResponse)
-def get_status(project_id: str):
+def get_status(project_id: str, language: Optional[str] = Query(None, description="Lenguaje (python, cpp, typescript)")):
     """Retorna el estado detallado del contenedor LSP de un proyecto."""
     try:
-        return lifecycle.get_status(project_id)
+        if language is None:
+            langs = registry.list_languages(project_id)
+            if not langs:
+                return {"status": "not_found"}
+            if len(langs) > 1:
+                raise HTTPException(status_code=400, detail=f"Hay múltiples lenguajes activos para {project_id}. Especifica ?language=...")
+            language = next(iter(langs.keys()))
+
+        return lifecycle.get_status(project_id, language)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.get("/{project_id}/logs")
-def get_logs(project_id: str, tail: int = Query(100, description="Número de líneas de log a retornar")):
+def get_logs(
+    project_id: str,
+    tail: int = Query(100, description="Número de líneas de log a retornar"),
+    language: Optional[str] = Query(None, description="Lenguaje (python, cpp, typescript)")
+):
     """Obtiene los logs del contenedor para debugging."""
     try:
-        logs = lifecycle.get_container_logs(project_id, tail=tail)
+        if language is None:
+            langs = registry.list_languages(project_id)
+            if not langs:
+                raise HTTPException(status_code=404, detail=f"No existe contenedor para {project_id}")
+            if len(langs) > 1:
+                raise HTTPException(status_code=400, detail=f"Hay múltiples lenguajes activos para {project_id}. Especifica ?language=...")
+            language = next(iter(langs.keys()))
+
+        logs = lifecycle.get_container_logs(project_id, language, tail=tail)
         return {"project_id": project_id, "logs": logs}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -102,22 +132,22 @@ def get_logs(project_id: str, tail: int = Query(100, description="Número de lí
 @router.get("/")
 def list_all():
     """Lista todos los contenedores activos con su información detallada."""
-    from app.services.registry import get_all
-    
-    containers = get_all()
+    containers = registry.get_all()
     
     # Enriquecer con estado actual
     detailed_list = []
-    for project_id in containers:
-        try:
-            status = lifecycle.get_status(project_id)
-            detailed_list.append(status)
-        except Exception as e:
-            detailed_list.append({
-                "project_id": project_id,
-                "status": "error",
-                "error": str(e)
-            })
+    for project_id, langs in containers.items():
+        for language in langs.keys():
+            try:
+                status = lifecycle.get_status(project_id, language)
+                detailed_list.append(status)
+            except Exception as e:
+                detailed_list.append({
+                    "project_id": project_id,
+                    "language": language,
+                    "status": "error",
+                    "error": str(e)
+                })
     
     return {
         "total": len(detailed_list),

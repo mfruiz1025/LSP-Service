@@ -32,7 +32,10 @@ export const servers = [
         args: [
             '--compile-commands-dir=/workspace',
             '--background-index',
-            '--clang-tidy'
+            '--clang-tidy',
+            '--all-scopes-completion',
+            '--completion-style=detailed',
+            '--header-insertion=iwyu'
         ],
         workDir: '/workspace',
         translatePaths: true,

@@ -29,30 +29,67 @@ def create_container(project_id: str, language: str, max_clients: int = 4):
     if language not in LANGUAGES:
         raise ValueError(f"Lenguaje no soportado: {language}. Usa: {LANGUAGES}")
 
-    if registry.exists(project_id):
-        existing = registry.get(project_id)
+    ws_public_host = os.environ.get("WS_PUBLIC_HOST", "127.0.0.1")
+    idle_timeout = os.environ.get("CONTAINER_IDLE_TIMEOUT", "300000")
+
+    client = _get_client()
+
+    # Recuperación: si el servicio reinició, el registry (en memoria) se pierde,
+    # pero el contenedor puede seguir existiendo. Detectarlo por labels.
+    try:
+        found = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"project_id={project_id}",
+                    f"language={language}",
+                    "type=lsp-multiplexor"
+                ]
+            }
+        )
+        if found:
+            container = found[0]
+            container.reload()
+            if container.status == "running":
+                port_mapping = container.attrs["NetworkSettings"]["Ports"][f"{LSPMUX_INTERNAL_PORT}/tcp"]
+                if port_mapping:
+                    host_port = int(port_mapping[0]["HostPort"])
+                    ws_url = f"ws://{ws_public_host}:{host_port}"
+                    registry.add(
+                        project_id=project_id,
+                        language=language,
+                        container_id=container.id,
+                        ws_port=host_port,
+                        ws_url=ws_url,
+                        max_clients=int(container.labels.get("max_clients", max_clients))
+                    )
+                    logger.info(f"Contenedor existente detectado por labels: {container.id[:12]} - WS: {ws_url}")
+                    return registry.get(project_id, language)
+            else:
+                logger.warning(f"Contenedor encontrado por labels pero no está corriendo ({container.status}); eliminando...")
+                container.remove(force=True)
+    except Exception as e:
+        logger.warning(f"No se pudo recuperar contenedor por labels: {e}")
+
+    if registry.exists(project_id, language):
+        existing = registry.get(project_id, language)
         try:
-            client = _get_client()
             container = client.containers.get(existing["container_id"])
             if container.status == "running":
-                logger.info(f"Contenedor existente para {project_id} está corriendo")
+                logger.info(f"Contenedor existente para {project_id} ({language}) está corriendo")
                 return existing
             else:
-                logger.warning(f"Contenedor existente para {project_id} no está corriendo, recreando...")
-                destroy_container(project_id)
+                logger.warning(f"Contenedor existente para {project_id} ({language}) no está corriendo, recreando...")
+                destroy_container(project_id, language)
         except Exception as e:
             logger.error(f"Error verificando contenedor existente: {e}")
-            registry.remove(project_id)
+            registry.remove(project_id, language)
 
     # Crea la carpeta del proyecto si no existe
     projects_dir = os.environ.get("PROJECTS_DIR") or os.path.expanduser("~/projects")
     project_path = os.path.join(projects_dir, project_id)
     os.makedirs(project_path, exist_ok=True)
-    
-    ws_public_host = os.environ.get("WS_PUBLIC_HOST", "127.0.0.1")
-    idle_timeout = os.environ.get("CONTAINER_IDLE_TIMEOUT", "300000")
 
-    client = _get_client()
     image = "lsp-multiplexor:latest"
     
     try:
@@ -112,26 +149,26 @@ def create_container(project_id: str, language: str, max_clients: int = 4):
         logger.info(f"Contenedor {container.id[:12]} creado - WS: {ws_url}")
         
         registry.add(
+            language=language,
             project_id=project_id,
             container_id=container.id,
-            language=language,
             ws_port=host_port,
             ws_url=ws_url,
             max_clients=max_clients
         )
         
-        return registry.get(project_id)
+        return registry.get(project_id, language)
         
     except Exception as e:
         logger.exception(f"Error al crear contenedor para {project_id}")
         raise RuntimeError(f"Error al crear contenedor: {e}")
 
 
-def destroy_container(project_id: str):
-    """Destruye el contenedor LSP de un proyecto."""
-    entry = registry.get(project_id)
+def destroy_container(project_id: str, language: str) -> bool:
+    """Destruye el contenedor LSP de un proyecto+lenguaje."""
+    entry = registry.get(project_id, language)
     if not entry:
-        raise ValueError(f"No existe contenedor para el proyecto {project_id}.")
+        return False
 
     client = _get_client()
     try:
@@ -140,12 +177,13 @@ def destroy_container(project_id: str):
     except Exception as e:
         logger.error(f"Error al eliminar contenedor: {e}")
     
-    registry.remove(project_id)
+    registry.remove(project_id, language)
+    return True
 
 
-def get_status(project_id: str) -> dict:
-    """Retorna el estado del contenedor LSP de un proyecto."""
-    entry = registry.get(project_id)
+def get_status(project_id: str, language: str) -> dict:
+    """Retorna el estado del contenedor LSP de un proyecto+lenguaje."""
+    entry = registry.get(project_id, language)
     if not entry:
         return {"status": "not_found"}
 
@@ -171,9 +209,9 @@ def get_status(project_id: str) -> dict:
         }
 
 
-def get_container_logs(project_id: str, tail: int = 100) -> str:
+def get_container_logs(project_id: str, language: str, tail: int = 100) -> str:
     """Obtiene los logs del contenedor para debugging."""
-    entry = registry.get(project_id)
+    entry = registry.get(project_id, language)
     if not entry:
         return "Contenedor no encontrado"
     

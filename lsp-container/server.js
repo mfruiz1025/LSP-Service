@@ -193,14 +193,22 @@ class LSPMultiplexer {
                             });
                         }
                     }
-                    
+
                     // Cachear capacidades del LSP para clientes futuros
                     if (message.id && message.result && message.result.capabilities) {
                         this.cachedCapabilities = message.result.capabilities;
                         this.cachedInitializeResult = message.result;
                         console.log('[LSP] Capacidades cacheadas');
                     }
-                    
+
+                    // Requests iniciados por el servidor LSP (id + method)
+                    // Importante: algunos servidores (p.ej. typescript-language-server) piden configuración
+                    // y pueden quedarse "colgados" si no se responde.
+                    if (message.id !== undefined && message.id !== null && message.method) {
+                        this.handleServerRequest(message);
+                        continue;
+                    }
+
                     // Responses (con id) deben rutearse al cliente origen
                     if (message.id !== undefined && message.id !== null) {
                         this.routeResponseToClient(message);
@@ -217,6 +225,69 @@ class LSPMultiplexer {
                 // Mensaje incompleto, esperar más datos
                 break;
             }
+        }
+    }
+
+    /**
+     * Maneja requests del servidor LSP hacia el cliente (id + method).
+     * Para mantener baja complejidad en el frontend, respondemos aquí con valores razonables.
+     * @param {Object} request - Request JSON-RPC originado por el LSP
+     */
+    handleServerRequest(request) {
+        const method = request.method;
+        console.log(`[LSPMultiplexer] Request del LSP hacia cliente: ${method}`);
+
+        const sendResult = (result) => {
+            this.sendToLSP({ jsonrpc: "2.0", id: request.id, result });
+        };
+
+        const sendError = (code, message) => {
+            this.sendToLSP({ jsonrpc: "2.0", id: request.id, error: { code, message } });
+        };
+
+        try {
+            if (method === 'workspace/configuration') {
+                const settings = this.getDefaultConfigurationForLanguage() || {};
+                const items = request?.params?.items || [];
+
+                const getBySection = (section) => {
+                    if (!section || typeof section !== 'string') return settings;
+                    let current = settings;
+                    for (const key of section.split('.')) {
+                        if (current && typeof current === 'object' && key in current) {
+                            current = current[key];
+                        } else {
+                            return {};
+                        }
+                    }
+                    return current ?? {};
+                };
+
+                const result = items.map((item) => getBySection(item?.section));
+                sendResult(result);
+                return;
+            }
+
+            if (method === 'workspace/workspaceFolders') {
+                sendResult([{ uri: `file://${this.workDir}`, name: 'workspace' }]);
+                return;
+            }
+
+            if (method === 'client/registerCapability' || method === 'client/unregisterCapability') {
+                sendResult(null);
+                return;
+            }
+
+            if (method === 'window/workDoneProgress/create') {
+                sendResult(null);
+                return;
+            }
+
+            // Default: responder null para no bloquear al servidor.
+            sendResult(null);
+        } catch (e) {
+            console.error('[LSPMultiplexer] Error manejando request del LSP:', e);
+            sendError(-32603, 'Internal error handling server request');
         }
     }
 
@@ -339,7 +410,14 @@ class LSPMultiplexer {
             },
             cpp: {
                 command: 'clangd',
-                args: ['--compile-commands-dir=' + this.workDir],
+                args: [
+                    '--compile-commands-dir=' + this.workDir,
+                    '--background-index',
+                    '--clang-tidy',
+                    '--all-scopes-completion',
+                    '--completion-style=detailed',
+                    '--header-insertion=iwyu'
+                ],
                 env: {}
             },
             typescript: {
@@ -350,6 +428,69 @@ class LSPMultiplexer {
         };
         
         return configs[this.language] || configs.python;
+    }
+
+    getDefaultConfigurationForLanguage() {
+        if (this.language === 'python') {
+            return {
+                pylsp: {
+                    plugins: {
+                        pycodestyle: { enabled: true },
+                        pyflakes: { enabled: true },
+                        flake8: { enabled: true },
+                        mccabe: { enabled: true }
+                    }
+                }
+            };
+        }
+
+        if (this.language === 'cpp') {
+            // clangd se configura principalmente por flags y compile_commands.json.
+            // Enviamos settings mínimos (harmless si clangd los ignora).
+            return {
+                clangd: {
+                    // Valores típicos; si no hay compilation database, clangd usa fallback.
+                    fallbackFlags: ['-std=c++17']
+                }
+            };
+        }
+
+        if (this.language === 'typescript') {
+            // typescript-language-server usa settings tipo VSCode.
+            // Enfocado en autocompletado (diagnósticos vienen de tsserver por defecto).
+            return {
+                typescript: {
+                    suggest: {
+                        completeFunctionCalls: true,
+                        includeAutomaticOptionalChainCompletions: true,
+                        autoImports: true
+                    }
+                },
+                javascript: {
+                    suggest: {
+                        completeFunctionCalls: true,
+                        includeAutomaticOptionalChainCompletions: true,
+                        autoImports: true
+                    }
+                }
+            };
+        }
+
+        return null;
+    }
+
+    sendDefaultConfigurationIfNeeded() {
+        if (this.defaultConfigurationSent) return;
+        const settings = this.getDefaultConfigurationForLanguage();
+        if (!settings) return;
+
+        this.defaultConfigurationSent = true;
+        this.sendToLSP({
+            jsonrpc: "2.0",
+            method: "workspace/didChangeConfiguration",
+            params: { settings }
+        });
+        console.log(`[LSPMultiplexer] Configuración por defecto enviada (${this.language})`);
     }
 
     /**
@@ -421,6 +562,11 @@ class LSPMultiplexer {
                 console.log(`[LSPMultiplexer] Cliente desconectado: ${clientId}`);
                 this.clients.delete(ws);
                 console.log(`[LSPMultiplexer] Clientes restantes: ${this.clients.size}/${this.maxClients}`);
+
+                // Si el cliente primario se desconecta, permitir que otro cliente envíe 'initialized' si hiciera falta
+                if (this.primaryClient === ws) {
+                    this.primaryClient = null;
+                }
 
                 // Cerrar/limpiar documentos que pertenecen a este cliente
                 for (const [uri, doc] of this.documents.entries()) {
@@ -502,30 +648,14 @@ class LSPMultiplexer {
 
         // Evitar que clientes secundarios envíen initialized al LSP
         if (message.method === 'initialized') {
+            if (this.primaryClient === null && !this.primaryInitializedForwarded) {
+                this.primaryClient = ws;
+            }
+
             if (ws === this.primaryClient && !this.primaryInitializedForwarded) {
                 this.primaryInitializedForwarded = true;
                 this.sendToLSP(message);
-
-                if (this.language === 'python' && !this.defaultConfigurationSent) {
-                    this.defaultConfigurationSent = true;
-                    this.sendToLSP({
-                        jsonrpc: "2.0",
-                        method: "workspace/didChangeConfiguration",
-                        params: {
-                            settings: {
-                                pylsp: {
-                                    plugins: {
-                                        pycodestyle: { enabled: true },
-                                        pyflakes: { enabled: true },
-                                        flake8: { enabled: true },
-                                        mccabe: { enabled: true }
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    console.log('[LSPMultiplexer] Configuración por defecto enviada a pylsp (plugins lint habilitados)');
-                }
+                this.sendDefaultConfigurationIfNeeded();
             } else {
                 this.sendLogMessage(ws, 'Ignoring initialized notification (shared LSP session)');
             }
