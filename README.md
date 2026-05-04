@@ -61,15 +61,23 @@ MAX_CLIENTS_PER_CONTAINER=4
 
 ```
 cd language-service
-python3 -m uvicorn app.main:app --reload --port 8000
+python3 -m uvicorn app.main:app --reload --port 8135
 ```
+
+### Linux
+** Importante para que se conecte al API Gateway **
+127.0.0.1 (localhost) es un loopback exclusivo del contenedor/namespace. Cuando un contenedor Docker intenta conectarse a host.docker.internal:8135, en realidad necesita acceder al IP del host real, no al loopback.
+```
+python3 -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8135
+```
+
 
 ## Peticiones de ejemplo
 
 Crear contenedor LSP:
 
 ```
-curl -X POST http://127.0.0.1:8000/lsp/proyecto-1 \
+curl -X POST http://127.0.0.1:8135/lsp/proyecto-1 \
   -H "Content-Type: application/json" \
   -d '{"language": "python"}'
 ```
@@ -77,13 +85,13 @@ curl -X POST http://127.0.0.1:8000/lsp/proyecto-1 \
 Consultar estado:
 
 ```
-curl http://127.0.0.1:8000/lsp/proyecto-1
+curl http://127.0.0.1:8135/lsp/proyecto-1
 ```
 
 Eliminar contenedor:
 
 ```
-curl -X DELETE http://127.0.0.1:8000/lsp/proyecto-1
+curl -X DELETE http://127.0.0.1:8135/lsp/proyecto-1
 ```
 
 ## Volumen del proyecto (workspace)
@@ -292,7 +300,7 @@ python3 test_clients.py -m 32768 4
 
 ```bash
 # Crear contenedor
-curl -X POST http://localhost:8000/lsp/test-project \
+curl -X POST http://localhost:8135/lsp/test-project \
   -H "Content-Type: application/json" \
   -d '{"language": "python", "max_clients": 4}'
 
@@ -647,13 +655,13 @@ Cliente (Frontend)          Multiplexor WebSocket          Servidor LSP
 
 En `editor.ts`, se utiliza:
 ```typescript
-const API_URL = enviroment.apiUrlLanguageServer || 'http://localhost:8000';
+const API_URL = enviroment.apiUrlLanguageServer || 'http://localhost:8135';
 ```
 
 Asegúrate de configurar `enviroment.ts` con:
 ```typescript
 export const enviroment = {
-  apiUrlLanguageServer: 'http://localhost:8000', // URL de la API LSP Service
+  apiUrlLanguageServer: 'http://localhost:8135', // URL de la API LSP Service
   // ... otras variables
 };
 ```
@@ -663,7 +671,7 @@ export const enviroment = {
 1. **Inicia el API LSP Service**:
    ```bash
    cd LSP-Service/language-service
-   python3 -m uvicorn app.main:app --reload --port 8000
+   python3 -m uvicorn app.main:app --reload --port 8135
    ```
 
 2. **Inicia el frontend**:
@@ -703,7 +711,7 @@ export const enviroment = {
          ↓ HTTP POST / DELETE
 ┌─────────────────────────────────────────┐
 │     API LSP Service (Python FastAPI)    │
-│     :8000/lsp/{projectId}               │
+│     :8135/lsp/{projectId}               │
 └─────────────────────────────────────────┘
          ↓ WebSocket
 ┌─────────────────────────────────────────┐
